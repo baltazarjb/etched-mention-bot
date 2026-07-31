@@ -24,4 +24,6 @@ for label, item, expected in CASES:
 
 actual, _ = li.structural_li(linkedin_post("MatX One supports LLM training and inference with SRAM and HBM"))
 assert actual == "accept", actual
+actual, _ = li.structural_li(linkedin_post("Max is retiring after thirty years of practicing law"))
+assert actual == "reject", actual
 print("MatX profile checks passed")

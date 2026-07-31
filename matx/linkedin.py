@@ -131,6 +131,11 @@ def structural_li(item):
     if mon.MATX_ONE_RE.search(txt):                                reasons.append("matx_one")
     if reasons:
         return "accept", reasons
+    # HarvestAPI's search is fuzzy enough that a query for MatX often returns
+    # ordinary "Max" posts. Never spend a judge call unless the exact brand
+    # token (or a high-signal founder/domain match handled above) is present.
+    if not mon.ETCHED_WORD_RE.search(txt):
+        return "reject", ["search_false_positive"]
     if mon.ETCHED_WORD_RE.search(txt) and mon.MATX_PC_RE.search(txt):
         return "reject", ["pc_form_factor"]
     return "maybe", []

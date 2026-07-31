@@ -131,6 +131,10 @@ def structural_li(item):
     if mon.SOHU_WORD_RE.search(txt) and mon.TECH_RE.search(txt): reasons.append("fractile+tech")
     if reasons:
         return "accept", reasons
+    # Apify search may return fuzzy matches. Require the exact company token
+    # unless a high-signal founder/domain match was already accepted above.
+    if not mon.ETCHED_WORD_RE.search(txt):
+        return "reject", ["search_false_positive"]
     if mon.ETCHED_WORD_RE.search(txt) and not mon.TECH_RE.search(txt) and mon.FRACTILE_STATS_RE.search(txt):
         return "reject", ["statistical_context"]
     return "maybe", []
