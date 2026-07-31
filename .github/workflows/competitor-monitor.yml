@@ -1,0 +1,55 @@
+name: Fractile and MatX X mention monitors
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: competitor-x-monitors
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Fractile X monitor
+        env:
+          TWAPI_KEY: ${{ secrets.TWAPI_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_MAIN_CHANNEL: C0BM2EYULTV
+          SLACK_REVIEW_CHANNEL: C0BM2EYULTV
+        run: python fractile/monitor.py
+
+      - name: Run MatX X monitor
+        env:
+          TWAPI_KEY: ${{ secrets.TWAPI_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_MAIN_CHANNEL: C0BM6NJLVHC
+          SLACK_REVIEW_CHANNEL: C0BM6NJLVHC
+        run: python matx/monitor.py
+
+      - name: Commit updated state
+        if: always()
+        run: |
+          git config user.name "mention-bot"
+          git config user.email "mention-bot@users.noreply.github.com"
+          git add fractile/state.json matx/state.json
+          git diff --staged --quiet && { echo "no state change"; exit 0; }
+          git commit -m "competitor X state: $(date -u +%FT%TZ)"
+          for i in 1 2 3 4 5; do
+            if git push; then exit 0; fi
+            git pull --rebase --autostash -X theirs origin main || git rebase --abort
+            sleep 3
+          done
+          exit 1

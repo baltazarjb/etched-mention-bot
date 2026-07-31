@@ -1,0 +1,55 @@
+name: Fractile and MatX LinkedIn mention monitors
+
+on:
+  schedule:
+    - cron: "27 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: competitor-linkedin-monitors
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Fractile LinkedIn monitor
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_MAIN_CHANNEL: C0BM2EYULTV
+          SLACK_REVIEW_CHANNEL: C0BM2EYULTV
+        run: python fractile/linkedin.py
+
+      - name: Run MatX LinkedIn monitor
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_MAIN_CHANNEL: C0BM6NJLVHC
+          SLACK_REVIEW_CHANNEL: C0BM6NJLVHC
+        run: python matx/linkedin.py
+
+      - name: Commit updated state
+        if: always()
+        run: |
+          git config user.name "mention-bot"
+          git config user.email "mention-bot@users.noreply.github.com"
+          git add fractile/linkedin_state.json matx/linkedin_state.json
+          git diff --staged --quiet && { echo "no state change"; exit 0; }
+          git commit -m "competitor LinkedIn state: $(date -u +%FT%TZ)"
+          for i in 1 2 3 4 5; do
+            if git push; then exit 0; fi
+            git pull --rebase --autostash -X theirs origin main || git rebase --abort
+            sleep 3
+          done
+          exit 1
