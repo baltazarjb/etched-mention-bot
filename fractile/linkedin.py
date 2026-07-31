@@ -32,7 +32,7 @@ APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 ACTOR       = "harvestapi~linkedin-post-search"
 STATE_FILE  = os.path.join(os.path.dirname(__file__), "linkedin_state.json")
 
-QUERIES = ["Fractile", "Walter Goodwin", "Pete Hughes", "Chris Smith"]
+QUERIES = ["Fractile", "Walter Goodwin Fractile"]
 MAX_POSTS_PER_QUERY = 100      # cost ceiling per query per run
 MAX_JUDGE_CALLS = 200
 WIDE_WINDOW_AFTER = 2 * 3600   # widen 1h -> 24h when the last run is older than this
@@ -261,8 +261,11 @@ def main():
     state = load_state()
     seen = set(state.get("seen_ids", []))
     now = int(time.time())
-    gap = now - (state.get("last_run_epoch") or 0)
-    posted_limit = pick_window(gap)
+    last_run = state.get("last_run_epoch") or 0
+    gap = now - last_run
+    # A new monitor starts with a bounded window. Treating last_run=0 as a
+    # years-long scheduler gap would scrape a noisy month of historical posts.
+    posted_limit = "24h" if not last_run else pick_window(gap)
 
     # 0) credit guard: on the FREE plan the scrape hard-fails at $0, so don't
     #    burn the last cents — pause loudly (daily Slack alert) instead.

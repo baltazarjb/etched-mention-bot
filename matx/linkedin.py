@@ -261,8 +261,11 @@ def main():
     state = load_state()
     seen = set(state.get("seen_ids", []))
     now = int(time.time())
-    gap = now - (state.get("last_run_epoch") or 0)
-    posted_limit = pick_window(gap)
+    last_run = state.get("last_run_epoch") or 0
+    gap = now - last_run
+    # A new monitor starts with a bounded window. Treating last_run=0 as a
+    # years-long scheduler gap would scrape a noisy month of historical posts.
+    posted_limit = "24h" if not last_run else pick_window(gap)
 
     # 0) credit guard: on the FREE plan the scrape hard-fails at $0, so don't
     #    burn the last cents — pause loudly (daily Slack alert) instead.
