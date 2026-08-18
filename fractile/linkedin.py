@@ -24,7 +24,7 @@ Optional env (same as monitor.py):
   ANTHROPIC_API_KEY, SLACK_BOT_TOKEN, SLACK_REVIEW_CHANNEL, SLACK_REVIEW_WEBHOOK_URL
 """
 
-import json, os, re, sys, time, datetime
+import json, os, re, sys, time, datetime, urllib.error
 
 import monitor as mon   # shared regexes, http helpers, slack senders, thresholds
 
@@ -71,8 +71,10 @@ def apify_credit():
         return None
 
 def credit_warning(credit):
-    """Warning line for Slack messages when the free credit is running low."""
-    if not credit or credit["plan"] != "FREE" or credit["remaining"] >= LOW_CREDIT_USD:
+    """Warning line for Slack messages when the prepaid credit is running low.
+    Applies to every plan: paid prepaid plans hard-stop at their monthly cap
+    exactly like the free one, so the plan id tells us nothing useful here."""
+    if not credit or credit["remaining"] >= LOW_CREDIT_USD:
         return None
     return (f":warning: *Apify credit low: ${credit['remaining']:.2f} of ${credit['max']:.0f} left* — "
             f"LinkedIn monitoring stops when it hits $0 (credit resets {credit['resets']}). "
@@ -83,8 +85,10 @@ def paused_alert(state, credit, dry=False):
     date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     if state.get("paused_alert_date") == date:
         return
-    text = (f":rotating_light: *LinkedIn mention monitoring is PAUSED — Apify credit exhausted* "
-            f"(${credit['used']:.2f} of ${credit['max']:.0f} used; resets {credit['resets']}).\n"
+    usage = (f" (${credit['used']:.2f} of ${credit['max']:.0f} used; resets {credit['resets']})"
+             if credit else "")
+    text = (f":rotating_light: *LinkedIn mention monitoring is PAUSED — Apify credit exhausted*"
+            f"{usage}.\n"
             f"LinkedIn mentions are NOT being collected right now. To resume, upgrade the Apify plan: "
             f"https://console.apify.com/billing — when it's back, I'll catch up on missed posts "
             f"(up to a week). X/Twitter monitoring is unaffected. This reminder repeats daily until fixed.")
@@ -276,7 +280,7 @@ def main():
     #    last_run_epoch is NOT advanced while paused, so the window keeps
     #    widening and the catch-up scrape on revival misses nothing (<=1 week).
     credit = apify_credit()
-    if credit and credit["plan"] == "FREE" and credit["remaining"] < DEAD_CREDIT_USD:
+    if credit and credit["remaining"] < DEAD_CREDIT_USD:
         print(f"[paused] Apify credit exhausted (${credit['used']:.2f}/${credit['max']:.0f})", flush=True)
         paused_alert(state, credit, dry=dry)
         if not dry: save_state(state)
@@ -287,6 +291,18 @@ def main():
     # 1) gather (dedup by post id)
     try:
         raw = li_search(posted_limit)
+    except urllib.error.HTTPError as e:
+        # 403 means Apify refused the run outright; in practice that is the
+        # monthly usage limit being spent (the credit guard above only catches
+        # it when the usage API agrees we are at $0). Exiting 1 here mails a
+        # failure notification every hour until someone tops the account up,
+        # so pause the same way the guard does: alert once a day, exit clean.
+        if e.code == 403:
+            print("[paused] apify refused the run (403) — treating as quota exhausted", flush=True)
+            paused_alert(state, credit, dry=dry)
+            if not dry: save_state(state)
+            return
+        print(f"FATAL: apify search failed: {e}", file=sys.stderr); sys.exit(1)
     except Exception as e:
         print(f"FATAL: apify search failed: {e}", file=sys.stderr); sys.exit(1)
     fetched = {}
