@@ -28,7 +28,7 @@ How a post qualifies:
 | Piece | X | LinkedIn |
 |-------|---|----------|
 | score | likes + 2·(RTs+quotes) + replies + bookmarks | reactions + 2·comments + 3·reposts |
-| re-checked at | ~1h, 2h, 4h, 8h, 16h, 24h, 36h, 48h after posting | 24h (+72h if the 24h look was close) |
+| checked at | ~1h after posting (one look; hot-at-discovery checked right away) | ~24h after posting (one look) |
 | the bar | max(absolute floor, **95th percentile** of what Etched mentions historically score at that age) | same |
 | flood control | each promotion in the last 24h raises the bar 15% (compounding, capped 8×) | same |
 | big-account rule | ≥100k followers qualifies at half the bar | — |
@@ -39,8 +39,8 @@ Each post is promoted at most once. State lives in `popular_state.json` / `popul
 
 Setup: just invite the bot (the `SLACK_BOT_TOKEN` one) to the popular channel — the channel id
 defaults in code. Secrets `SLACK_POPULAR_CHANNEL` / `SLACK_POPULAR_WEBHOOK_URL` override it if
-ever needed. Running cost: a few dollars/month of
-twitterapi.io re-fetches, ~$2-3/month of Apify (`apimaestro/linkedin-post-detail`, $5/1k).
+ever needed. Running cost: one fetch per mention — well under $1/month of twitterapi.io,
+~$1-2/month of Apify (`apimaestro/linkedin-post-detail`, $5/1k).
 Test offline with `python3 test_popular.py`; dry-run with `python3 popular.py --dry`.
 
 ## One-time setup (~10 minutes)
