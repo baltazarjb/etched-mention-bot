@@ -2,11 +2,11 @@
 """
 Offline test for the popular-mention trackers (no API keys, nothing sent).
 
-Covers the scoring math, the floor/percentile/damping bar, checkpoint
-scheduling, the watchlist lifecycle end-to-end with a fake clock (viral post
-promoted once, dud never, deleted post dropped, everything retired), the
-bootstrap seeding, the big-account rule, and the LinkedIn stat extraction
-across the actor output shapes seen in the wild.
+Covers the scoring math, the floor/percentile/damping bar, the single ~1h look
+(X) and ~24h look (LinkedIn), the watchlist lifecycle end-to-end with a fake
+clock (viral post promoted once, dud never, deleted post dropped, stale post
+skipped, everything retired), the bootstrap seeding, the big-account rule, and
+the LinkedIn stat extraction across the actor output shapes seen in the wild.
 """
 import datetime, json, os, sys, tempfile, types
 
@@ -66,14 +66,11 @@ def run():
     st["promoted"] = [[now - 90000, "x", 1]] * 40                     # older than 24h
     check("old promotions don't damp", pop.bar(st, 1, pop.FLOORS, now) == pop.FLOORS[1])
 
-    # ---- checkpoint scheduling ----
-    rec = {"checks": {}}
-    check("age 0.5h -> nothing due", pop.due_cp(rec, 0.5, pop.CHECKPOINTS) is None)
-    check("age 1.2h -> 1h due", pop.due_cp(rec, 1.2, pop.CHECKPOINTS) == 1)
-    check("late entry age 9h -> jumps to 8h", pop.due_cp(rec, 9.0, pop.CHECKPOINTS) == 8)
-    rec = {"checks": {"1": 5, "2": None}}
-    check("skipped/checked cps not re-due", pop.due_cp(rec, 2.5, pop.CHECKPOINTS) is None)
-    check("next cp due after gap", pop.due_cp(rec, 4.5, pop.CHECKPOINTS) == 4)
+    # ---- the single look's scheduling ----
+    check("age 0.5h -> nothing due", pop.due_cp({"checks": {}}, 0.5, pop.CHECKPOINTS) is None)
+    check("age 1.2h -> the 1h look is due", pop.due_cp({"checks": {}}, 1.2, pop.CHECKPOINTS) == 1)
+    check("already measured -> nothing due", pop.due_cp({"checks": {"1": 5}}, 1.5, pop.CHECKPOINTS) is None)
+    check("skipped counts as handled", pop.due_cp({"checks": {"1": None}}, 2.0, pop.CHECKPOINTS) is None)
 
     # ---- bootstrap seeding (fake history + fake refetch) ----
     seen_file = os.path.join(tmp, "seen.json")
@@ -87,10 +84,9 @@ def run():
     pop.bootstrap(st, now)
     m.STATE_FILE, pop.batch_fetch = old_state_file, old_batch
     check("bootstrap marks seeded", st["seeded"])
-    check("bootstrap seeds every checkpoint", all(str(cp) in st["baseline"] for cp in pop.CHECKPOINTS))
-    b24, b1 = pop.bar(st, 24, pop.FLOORS, now), pop.bar(st, 1, pop.FLOORS, now)
-    check("seeded 24h bar ~ p95 of finals", 500 <= b24 <= 600)
-    check("1h seed scaled by accrual", abs(b1 - b24 * pop.ACCRUAL[1]) < b24 * 0.06)
+    check("bootstrap seeds the 1h baseline", len(st["baseline"].get("1", [])) == 60)
+    b1 = pop.bar(st, 1, pop.FLOORS, now)
+    check("seeded 1h bar ~ 35% of final p95", 180 <= b1 <= 210)
 
     # ---- LinkedIn stat extraction across actor output shapes ----
     shapes = [
@@ -125,24 +121,29 @@ def run():
     sys.argv = [a for a in sys.argv if a != "--dry"]
 
     # A: viral from minute one. B: dud. C: gets deleted. D: modest but 200k account.
+    # E: entered stale (outage recovery) — must be skipped, not measured late.
     A = tw("100", t0 - 1800, likes=400, rts=80, handle="bignews")
     B = tw("200", t0 - 1800, likes=1, handle="quietguy")
     C = tw("300", t0 - 1800, likes=2, handle="deleter")
     D = tw("400", t0 - 1800, likes=3, followers=250_000, handle="vcwhale")
-    fleet.update({"100": A, "200": B, "300": C, "400": D})
-    pop.watch_tweets([A, B, C, D])
+    E = tw("500", t0 - 4 * 3600, likes=900, handle="toolate")
+    fleet.update({"100": A, "200": B, "300": C, "400": D, "500": E})
+    pop.watch_tweets([A, B, C, D, E])
     s = pop.load_state()
-    check("watchlist took all four", len(s["watch"]) == 4)
+    check("watchlist took all five", len(s["watch"]) == 5)
     pop.watch_tweets([A])
-    check("re-add is a no-op", len(pop.load_state()["watch"]) == 4)
+    check("re-add is a no-op", len(pop.load_state()["watch"]) == 5)
 
-    pop.run()   # t0: A already over the bar at discovery -> instant promote
+    pop.run()   # t0: A already over the bar at discovery -> instant promote; E skipped+retired
+    s = pop.load_state()
     check("viral-at-discovery promoted immediately", len(delivered) == 1 and "@bignews" in delivered[0])
+    check("stale post skipped, never promoted, retired", "500" not in s["watch"]
+          and not any("toolate" in fb for fb in delivered))
 
-    clock["now"] = t0 + int(1.3 * 3600)                    # everyone ~1.8h old
+    clock["now"] = t0 + int(0.9 * 3600)                    # B/C/D now ~1.4h old
     fleet["300"] = None                                    # C deleted
     fleet["400"] = tw("400", t0 - 1800, likes=14, replies=4, followers=250_000, handle="vcwhale")
-    pop.run()   # 1h checkpoint for B (dud), C (missing), D (big-account rule)
+    pop.run()   # the 1h look for B (dud), C (missing), D (big-account rule)
     s = pop.load_state()
     bar1 = pop.FLOORS[1] * 1.15                            # one promotion in last 24h
     check("dud not promoted", not s["watch"]["200"]["promoted"])
@@ -151,17 +152,17 @@ def run():
           s["watch"]["400"]["promoted"] and 18 >= bar1 * pop.BIG_FACTOR)
     check("big-account note in message", any("vcwhale" in fb for fb in delivered) and len(delivered) == 2)
 
-    clock["now"] = t0 + int(2.4 * 3600)
-    pop.run()   # 2h checkpoint; C misses again -> dropped
+    clock["now"] = t0 + int(1.4 * 3600)
+    pop.run()   # C still in its window, still missing -> second miss -> dropped
     s = pop.load_state()
     check("deleted post dropped after 2 misses", "300" not in s["watch"])
     check("no double promotion", len(delivered) == 2)
     check("baseline collected live samples", len(s["baseline"].get("1", [])) >= 2)
 
-    clock["now"] = t0 + 50 * 3600
-    pop.run()   # everything past 48h -> retired
+    clock["now"] = t0 + int(3.1 * 3600)
+    pop.run()   # everything past 3h -> retired
     s = pop.load_state()
-    check("watchlist retired after 48h", len(s["watch"]) == 0)
+    check("watchlist retired after 3h", len(s["watch"]) == 0)
     check("promotions logged", len(s["promoted"]) == 2)
 
     pop.time, pop.batch_fetch, pop.deliver = old_time, old_batch, old_deliver
@@ -193,8 +194,16 @@ def run():
            "postedAt": {"timestamp": (t0 - 3600) * 1000},
            "author": {"name": "Quiet Person"}, "content": "etched thoughts on chips",
            "engagement": {"likes": 1, "comments": 0, "shares": 0}}
-    pli.watch_posts([hot, dud])
-    check("LinkedIn watchlist took both", len(pop.load_state(pli.STATE_FILE)["watch"]) == 2)
+    stale = {"id": "li3", "linkedinUrl": "https://www.linkedin.com/posts/baz_activity-3333444455556666777-QqQq",
+             "postedAt": {"timestamp": (t0 - 40 * 3600) * 1000},
+             "author": {"name": "Old News"}, "content": "etched.ai from a while back",
+             "engagement": {"likes": 500, "comments": 50, "shares": 20}}
+    pli.watch_posts([hot, dud, stale])
+    check("LinkedIn watchlist took all three", len(pop.load_state(pli.STATE_FILE)["watch"]) == 3)
+
+    pli.run()   # nothing due yet; the stale one is skipped and retired, never promoted
+    s = pop.load_state(pli.STATE_FILE)
+    check("stale LinkedIn post skipped + retired", "li3" not in s["watch"] and not ldelivered)
 
     lclock["now"] = t0 + 25 * 3600   # both due their 24h look
     lresults = [
@@ -209,15 +218,10 @@ def run():
           s["watch"]["li1"]["promoted"] and len(ldelivered) == 1 and "Big Voice" in ldelivered[0])
     check("dud recorded, not promoted", s["watch"]["li2"]["checks"]["24"] == 6 and not s["watch"]["li2"]["promoted"])
 
-    lclock["now"] = t0 + 73 * 3600
+    lclock["now"] = t0 + 38 * 3600
     lresults = []
-    pli.run()            # dud's 24h score is under 40% of the bar -> 72h look skipped
-    s = pop.load_state(pli.STATE_FILE)
-    check("cheap-skip of the 72h re-check for duds", s["watch"]["li2"]["checks"].get("72", "absent") is None)
-
-    lclock["now"] = t0 + 80 * 3600
     pli.run()
-    check("LinkedIn watchlist retired after 78h", len(pop.load_state(pli.STATE_FILE)["watch"]) == 0)
+    check("LinkedIn watchlist retired after 36h", len(pop.load_state(pli.STATE_FILE)["watch"]) == 0)
 
     pli.time, pli.fetch_details, li.apify_credit, li.APIFY_TOKEN = old_ltime, old_fetch, old_credit, old_tok
     pop.deliver, pop.time = old_pdeliver, old_time
@@ -231,7 +235,7 @@ def run():
            "url": "https://x.com/chipwatcher/status/2074249196140437865"}
     sample = tw("2074249196140437865", 0, likes=1240, rts=340, quotes=41, replies=55, bookmarks=88,
                 handle="chipwatcher", text="The Sohu chip does 500k tokens/sec on Llama 70B. This changes everything.")
-    fb, blocks = pop.build_popular_msg(rec, sample, 4.2)
+    fb, blocks = pop.build_popular_msg(rec, sample, 1.1)
     print("fallback:", fb)
     print(json.dumps({"text": fb, "blocks": blocks}, indent=2)[:900])
 
