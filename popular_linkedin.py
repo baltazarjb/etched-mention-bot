@@ -6,16 +6,16 @@ LinkedIn sibling of popular.py: re-checks each accepted LinkedIn mention's
 engagement after it has had time to travel, and promotes the few that clear
 the same floor + percentile + damping bar to the popular channel.
 
-LinkedIn engagement accrues over days, not minutes, so checkpoints are sparse:
-  24h  catches most risers
-  72h  catches slow burners — only fetched when the 24h score reached 40% of
-       the bar (no point paying to re-check an obvious dud)
+LinkedIn engagement accrues over days, not minutes, so the single look happens
+~24h after posting (one detail-fetch per mention). A post that's already hot at
+discovery is checked immediately instead; a post whose window was missed
+(outage, credit pause) is skipped, not measured stale.
 
   score = reactions + 2*comments + 3*reposts   (comments and reposts are rarer
           and stronger signals on LinkedIn than reactions)
 
 Re-checks use the Apify actor apimaestro/linkedin-post-detail (post_urls in,
-engagement out, no cookies, $5/1k results — at our volume ~$2-3/month). Its
+engagement out, no cookies, $5/1k results — at our volume ~$1-2/month). Its
 output shape isn't pinned by a contract, so stat extraction is defensive and
 gives up loudly (item logged, retried next run) rather than guessing zeros.
 
@@ -36,10 +36,10 @@ import popular as pop      # the shared bar/baseline/watch machinery
 STATE_FILE = os.path.join(os.path.dirname(__file__), "popular_linkedin_state.json")
 DETAIL_ACTOR = "apimaestro~linkedin-post-detail"
 
-CHECKPOINTS = [24, 72]
-FLOORS = {24: 50, 72: 80}
-SECOND_LOOK_FRACTION = 0.4    # 72h check only if the 24h score reached this share of the bar
-RETIRE_H = 78
+CHECKPOINTS = [24]        # measure each mention ONCE, ~24h after posting
+FLOORS = {24: 50}
+CHECK_BY = {24: 36}       # missed the window (outage/credit pause)? skip it, don't skew
+RETIRE_H = 36
 MAX_MISS = 3                  # unparseable/absent results tolerated before giving up
 
 ACTIVITY_ID_RE = re.compile(r"(\d{15,25})")
@@ -162,16 +162,14 @@ def run():
     state = pop.load_state(STATE_FILE)
     now = int(time.time())
 
-    # 1) who's due a look? (72h only if 24h was promising — each fetch costs)
+    # 1) who's due their one look?
     due = {}
     for pid, rec in state["watch"].items():
         age_h = (now - rec["created"]) / 3600.0
         cp = pop.due_cp(rec, age_h, CHECKPOINTS)
-        if cp == 72 and not rec["promoted"]:
-            s24 = rec["checks"].get("24")
-            if s24 is not None and s24 < SECOND_LOOK_FRACTION * pop.bar(state, 24, FLOORS, now):
-                rec["checks"]["72"] = None
-                continue
+        if cp is not None and age_h > CHECK_BY[cp]:
+            rec["checks"][str(cp)] = None   # missed the window; don't measure stale
+            cp = None
         if (cp is None and not rec["checks"] and not rec["promoted"]
                 and rec.get("disc_score", 0) >= pop.bar(state, 24, FLOORS, now)):
             cp = 24               # already hot at discovery — check now
