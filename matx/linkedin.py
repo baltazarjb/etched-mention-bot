@@ -131,10 +131,14 @@ def structural_li(item):
         return "maybe", []          # image-only post the search still matched -> judge/review
     reasons = []
     if mon.STRONG_TEXT_RE.search(txt):                           reasons.append("matx.com")
-    if mon.FOUNDERS_RE.search(txt):                              reasons.append("founder_name")
+    if mon.FOUNDERS_STRONG_RE.search(txt):                       reasons.append("founder_name")
     if mon.MATX_ONE_RE.search(txt):                                reasons.append("matx_one")
     if reasons:
         return "accept", reasons
+    # A common-name founder (Mike Gunter) never auto-accepts: in a tech context
+    # the judge decides; otherwise fall through to the reject below.
+    if mon.FOUNDERS_WEAK_RE.search(txt) and mon.TECH_RE.search(txt):
+        return "maybe", []
     # HarvestAPI's search is fuzzy enough that a query for MatX often returns
     # ordinary "Max" posts. Never spend a judge call unless the exact brand
     # token (or a high-signal founder/domain match handled above) is present.

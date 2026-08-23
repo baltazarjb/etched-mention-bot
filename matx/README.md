@@ -7,13 +7,19 @@ polluting the main feed.
 
 ## What it monitors
 
-- MatX, `matx.com`, and the MatX One chip.
-- Relevant references to founders Reiner Pope and Mike Gunter.
+- MatX, `matx.com`, the MatX One chip, and the company’s X account `@MatXComputing`
+  (plus founder accounts `@reinerpope` and `@MikeGunter_`).
+- Reiner Pope on sight; Mike Gunter only alongside MatX / AI-hardware context
+  (a common name never auto-posts).
 - MatX’s LLM hardware context: SRAM-resident weights, HBM KV cache, systolic arrays, throughput,
   low latency, training, RL, and inference.
 
-The judge excludes the unrelated Israeli manufacturing accelerator MatX (`matx-il.com`). No
-unverified X account is treated as MatX’s official account.
+Every search query is anchored to the company. A post whose resolved content doesn’t name MatX
+is dropped — including posts that only matched because an unrelated author’s handle contains
+“matx” — and the review thread only gets links the bot genuinely could not read.
+
+The judge excludes the unrelated Israeli manufacturing accelerator MatX (`matx-il.com`).
+`@MatX` itself is NOT the company and is not treated as a signal.
 
 ## Required GitHub repository secrets
 
