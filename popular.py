@@ -10,14 +10,15 @@ How "popular" is decided (three parts, no magic):
   score        likes + 2*(retweets+quotes) + replies + bookmarks. Views are
                excluded on purpose: they're bot-inflated and follower-driven;
                amplification and engagement are what we're after.
-  checkpoints  each watched post is re-fetched ~1h, 2h, 4h, 8h, 16h, 24h, 36h
-               and 48h after it was posted. Log-spaced: cheap (~8 fetches per
-               post, $0.00015 each), and a late bloomer is still caught within
-               ~2x of when it takes off.
-  the bar      at each checkpoint the score must beat
+  one look     each watched post is re-fetched ONCE, ~1h after it was posted
+               (one $0.00015 fetch per mention). A post that's already hot at
+               discovery is checked immediately instead. If a workflow outage
+               makes us miss the ~1h window, the post is skipped, not measured
+               stale.
+  the bar      the ~1h score must beat
                    max( absolute floor,
                         95th percentile of what Etched mentions historically
-                        scored at that same age )
+                        scored at that age )
                The floor stops a quiet week from promoting a 10-like post; the
                percentile keeps "top ~5%" honest as baseline volume shifts.
                Every promotion in the trailing 24h raises the bar 15%
@@ -28,12 +29,12 @@ How "popular" is decided (three parts, no magic):
 
 Cold start: the first run seeds the percentile baseline from history. It
 re-fetches the newest candidate ids in monitor's state.json (one-time, ~$0.30),
-keeps the structural accepts, and back-scales their near-final scores to each
-checkpoint age with a standard engagement-accrual curve.
+keeps the structural accepts, and back-scales their near-final scores to ~1h
+age with a standard engagement-accrual factor.
 
-Each post is promoted at most once, tracked to 48h (so baselines stay honest),
-then forgotten. --dry prints would-be promotions and saves no state (a later
-real run redoes the same checks).
+Each post is measured once, promoted at most once, and forgotten after a few
+hours. --dry prints would-be promotions and saves no state (a later real run
+redoes the same checks).
 
 Data source : twitterapi.io  /twitter/tweets  (batch of 50, $0.00015/tweet;
               steady state is a few dollars a month)
@@ -56,8 +57,9 @@ SLACK_POPULAR_WEBHOOK = os.environ.get("SLACK_POPULAR_WEBHOOK_URL", "")
 # token is the secret, and it only works in channels the bot was invited to)
 SLACK_POPULAR_CHANNEL = os.environ.get("SLACK_POPULAR_CHANNEL", "") or "C0BRL1RT7B9"
 
-CHECKPOINTS = [1, 2, 4, 8, 16, 24, 36, 48]           # hours after posting
-FLOORS = {1: 25, 2: 35, 4: 50, 8: 70, 16: 90, 24: 100, 36: 110, 48: 120}
+CHECKPOINTS = [1]         # measure each mention ONCE, ~1h after posting
+FLOORS = {1: 25}
+CHECK_BY = {1: 2.5}       # missed the measuring window (outage)? skip it, don't skew
 PCTL          = 95        # "top 5%"
 MIN_BASELINE  = 20        # samples before the percentile can outrank the floor
 BASELINE_KEEP = 400       # per checkpoint (weeks of history at current volume)
@@ -66,14 +68,14 @@ DAMP_STEP = 1.15          # bar multiplier per promotion in the last 24h
 DAMP_CAP  = 8.0
 BIG_FOLLOWERS = 100_000   # accounts this big qualify at BIG_FACTOR * bar
 BIG_FACTOR    = 0.5
-RETIRE_H  = 48
+RETIRE_H  = 3
 WATCH_CAP = 1500          # sanity cap on the watchlist; oldest dropped first
 BOOTSTRAP_IDS = 2000      # newest candidate ids refetched to seed the baseline
 
-# X engagement accrues fast then flattens; rough share of the 24h score a post
-# already has at each age. Used ONLY to back-scale near-final bootstrap data
-# into per-checkpoint seeds — live measurements replace these organically.
-ACCRUAL = {1: 0.35, 2: 0.50, 4: 0.65, 8: 0.80, 16: 0.92, 24: 1.0, 36: 1.05, 48: 1.08}
+# X engagement accrues fast then flattens; a post has roughly this share of its
+# final score at 1h. Used ONLY to back-scale near-final bootstrap data into the
+# 1h seed — live measurements replace it organically.
+ACCRUAL = {1: 0.35}
 
 # ------------------------------------------------------------------ state
 def empty_state():
@@ -225,7 +227,7 @@ def bootstrap(state, now):
     state["seeded"] = True
     print(f"[bootstrap] seeded from {len(finals)} accepted mentions: "
           f"final-score p50={percentile(finals, 50):.0f} p95={percentile(finals, PCTL):.0f} "
-          f"-> opening bars 1h={bar(state, 1, FLOORS, now):.0f} 24h={bar(state, 24, FLOORS, now):.0f}", flush=True)
+          f"-> opening 1h bar {bar(state, 1, FLOORS, now):.0f}", flush=True)
 
 # ------------------------------------------------------------------ slack
 def fmt_age(age_h):
@@ -290,6 +292,9 @@ def run():
     for tid, rec in state["watch"].items():
         age_h = (now - rec["created"]) / 3600.0
         cp = due_cp(rec, age_h, CHECKPOINTS)
+        if cp is not None and age_h > CHECK_BY[cp]:
+            rec["checks"][str(cp)] = None   # missed the window (outage); don't measure stale
+            cp = None
         if (cp is None and not rec["checks"] and not rec["promoted"]
                 and rec.get("disc_score", 0) >= bar(state, CHECKPOINTS[0], FLOORS, now)):
             cp = CHECKPOINTS[0]   # already hot at discovery — don't wait for the 1h mark
@@ -342,7 +347,7 @@ def run():
         del state["watch"][tid]
 
     print(f"[popular] watching={len(state['watch'])} checked={len(due)} promoted_now={promoted_now} "
-          f"bar 1h={bar(state, 1, FLOORS, now):.0f} 24h={bar(state, 24, FLOORS, now):.0f}", flush=True)
+          f"bar 1h={bar(state, 1, FLOORS, now):.0f}", flush=True)
     if not dry:
         save_state(state)
 
