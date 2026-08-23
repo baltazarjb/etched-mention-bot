@@ -8,8 +8,13 @@ polluting the main feed.
 ## What it monitors
 
 - Fractile, `fractile.ai`, and Fractile’s AI-inference hardware.
-- Relevant references to Walter Goodwin, Pete Hughes, and Chris Smith.
-- Fractile’s compute-in-memory / memory-compute architecture, where context makes the company clear.
+- Walter Goodwin on sight; Pete Hughes and Chris Smith only alongside Fractile / AI-hardware
+  context (common names never auto-post).
+
+Every search query is anchored to the company — there is no topic-only monitoring
+(“compute in memory”, SRAM, …), because those queries flooded the review thread with
+unrelated industry posts. A post whose resolved content doesn’t name Fractile is dropped;
+the review thread only gets links the bot genuinely could not read.
 
 The classifier explicitly rejects statistical uses of “fractile” and the unrelated Fractile Labs.
 No unverified X account is treated as Fractile’s official account.

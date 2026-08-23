@@ -10,9 +10,10 @@ Detection is TIERED for high precision (only the chip company) AND high recall:
   strong structural signals   -> auto-accept                 (near-100% precision, no LLM)
   clear non-company context   -> drop cheaply                (regex, no LLM)
   bare link, no visible signal -> RESOLVE it:
-        external page  -> fetch the article, judge its real content
-        X-native page  -> read it via FxTwitter (X Articles + linked tweets), judge that;
-                          only if unreadable -> review (never guess)
+        external page  -> fetch the article; X-native page -> read it via FxTwitter
+        resolved text names Fractile -> judge it; resolved but Fractile absent -> drop
+        a real link we could NOT read -> review (never guess)
+        nothing to read at all (handle/display-name match) -> drop
   ambiguous everything else   -> Claude Haiku judges         (relevant? confidence?)
 
 Routing:
@@ -51,10 +52,13 @@ JUDGE_MODEL = "claude-haiku-4-5-20251001"
 STATE_FILE  = os.path.join(os.path.dirname(__file__), "state.json")
 
 # No official Fractile X account is currently published, so do not assume a
-# similarly-named account belongs to the company.  Founder-name matches are
-# still high-signal, and the broad name query below covers all other posts.
+# similarly-named account belongs to the company.
 HANDLES  = set()
-FOUNDERS_RE = re.compile(r"\bwalter goodwin\b|\bpete hughes\b|\bchris smith\b", re.I)
+# "Walter Goodwin" is distinctive enough to trust on sight. "Pete Hughes" and
+# "Chris Smith" are common names — they earn a judge call, never an auto-accept
+# (bare-name auto-accepts put random people's posts straight in the main feed).
+FOUNDERS_STRONG_RE = re.compile(r"\bwalter goodwin\b", re.I)
+FOUNDERS_WEAK_RE   = re.compile(r"\bpete hughes\b|\bchris smith\b", re.I)
 
 FIRST_RUN_LOOKBACK_HOURS = 3
 OVERLAP_SECONDS = 180
@@ -62,11 +66,18 @@ MAX_JUDGE_CALLS = 400
 MAX_FETCH = 60            # cap link-resolution fetches per run (excess -> review)
 CONF_ACCEPT = 0.6
 
+# Every query must be ANCHORED to the company. X search ANDs adjacent terms
+# tighter than OR, so an un-parenthesized name in an OR list matches ON ITS OWN —
+# the old founders query pulled in every "Pete Hughes" on the platform, and the
+# old topic query ("memory compute", SRAM…) pulled in the entire semiconductor
+# newsfeed; none of those posts contain "fractile", so they all fell through to
+# the review thread. Topic-only queries are deliberately gone: any post that
+# matters names Fractile, and query 1 already matches the word in text, URL
+# slugs and handles.
 QUERIES = [
     'fractile -filter:retweets',
     '(url:fractile.ai OR "Fractile AI" OR "Fractile chip" OR "Fractile hardware") -filter:retweets',
-    '("Walter Goodwin" OR "Pete Hughes" OR "Chris Smith" (Fractile OR chip OR inference OR AI)) -filter:retweets',
-    '("compute in memory" OR "memory compute" OR SRAM (Fractile OR inference OR accelerator)) -filter:retweets',
+    '(("Walter Goodwin" OR "Pete Hughes" OR "Chris Smith") (Fractile OR fractile.ai OR "AI chip" OR "AI chips" OR "AI hardware" OR semiconductor OR inference)) -filter:retweets',
 ]
 
 # ------------------------------------------------------------------ tier regexes
@@ -263,11 +274,12 @@ def structural(t):
     urls = expanded_urls(t)
     url_blob = " ".join(urls)
     if ms & HANDLES:                                         reasons.append("mentions:@" + ",@".join(sorted(ms & HANDLES)))
+    if author_of(t) in HANDLES:                              reasons.append("from_company")
     if (t.get("inReplyToUsername") or "").lower() in HANDLES: reasons.append("reply_to_company")
     if author_of(t.get("quoted_tweet")) in HANDLES:          reasons.append("quotes_company")
     if author_of(t.get("retweeted_tweet")) in HANDLES:       reasons.append("retweets_company")
     if STRONG_TEXT_RE.search(txt):                           reasons.append("fractile.ai")
-    if FOUNDERS_RE.search(txt):                              reasons.append("founder_name")
+    if FOUNDERS_STRONG_RE.search(txt):                       reasons.append("founder_name")
     if SOHU_WORD_RE.search(txt) and TECH_RE.search(txt):     reasons.append("fractile+tech")
     if URL_SIGNAL_RE.search(url_blob):                       reasons.append("fractile_url")
     if reasons:
@@ -277,8 +289,9 @@ def structural(t):
     if ETCHED_WORD_RE.search(txt) and not TECH_RE.search(txt) and FRACTILE_STATS_RE.search(txt):
         return "reject", ["statistical_context"]
 
-    # visible Fractile signal but ambiguous -> judge on the tweet text
-    if ETCHED_WORD_RE.search(txt) or SOHU_WORD_RE.search(txt):
+    # visible Fractile signal (or a common-name founder match) but ambiguous
+    # -> judge on the tweet text
+    if ETCHED_WORD_RE.search(txt) or SOHU_WORD_RE.search(txt) or FOUNDERS_WEAK_RE.search(txt):
         return "maybe", []
 
     # NO visible signal: the search matched hidden linked content. Resolve it.
@@ -289,6 +302,22 @@ def structural(t):
     # and linked tweets can be read via FxTwitter -> fetch_x. If that fails,
     # main() sends it to review — never guess.
     return "fetch_x", urls[:1]
+
+def route_resolved(content, had_link):
+    """Route a tweet that had NO visible Fractile signal after resolving its
+    hidden content. The search index matched something outside the tweet text
+    (a URL slug, an author handle fragment, a display name), so:
+      resolved text that names Fractile -> judge   (real candidate)
+      a real link we could NOT read     -> review  (never guess)
+      anything else                     -> drop    (we read what there was to
+        read and Fractile isn't in it, or there was never anything to read).
+    Review is reserved for genuinely unreadable links; 'we read it and it is
+    not about us' is a confident drop, not a review item."""
+    if content and (ETCHED_WORD_RE.search(content) or SOHU_WORD_RE.search(content)):
+        return "judge"
+    if not content and had_link:
+        return "review"
+    return "drop"
 
 def judge(t, content=None):
     """Ask Claude Haiku with structured outputs (guaranteed JSON).
@@ -500,7 +529,7 @@ def main():
 
     # 2) classify. Build a judge queue; resolve bare links along the way.
     to_main, to_review, judge_queue = [], [], []
-    fetches = 0
+    fetches, dropped_resolved = 0, 0
     for tid, t in fetched.items():
         d, extra = structural(t)
         if d == "reject":
@@ -517,10 +546,13 @@ def main():
                 _, content = fetch_url_text(extra[0] if extra else "")
             else:
                 content = fetch_x_native_text(t, extra[0] if extra else "")
-            if content and (ETCHED_WORD_RE.search(content) or SOHU_WORD_RE.search(content)):
+            r = route_resolved(content, bool(extra))
+            if r == "judge":
                 judge_queue.append((t, content, "link"))
-            else:
+            elif r == "review":
                 to_review.append((t, ["unresolved_link"], None))   # couldn't read it -> review, never guess
+            else:
+                dropped_resolved += 1
 
     # judge most-promising first so a noise spike can't starve a real mention
     def _prio(item):
@@ -544,6 +576,7 @@ def main():
         to_main.append((t, ["link_relevant" if kind == "link" else "judge_relevant"], v))
 
     print(f"[tier] main={len(to_main)}  review={len(to_review)}  judged={judged}  fetched_links={fetches}"
+          f"  dropped_resolved={dropped_resolved}"
           f"{'  (JUDGE CAP HIT)' if judged >= MAX_JUDGE_CALLS else ''}", flush=True)
 
     # 3) deliver (oldest first)

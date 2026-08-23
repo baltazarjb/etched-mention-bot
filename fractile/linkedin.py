@@ -131,10 +131,14 @@ def structural_li(item):
         return "maybe", []          # image-only post the search still matched -> judge/review
     reasons = []
     if mon.STRONG_TEXT_RE.search(txt):                           reasons.append("fractile.ai")
-    if mon.FOUNDERS_RE.search(txt):                              reasons.append("founder_name")
+    if mon.FOUNDERS_STRONG_RE.search(txt):                       reasons.append("founder_name")
     if mon.SOHU_WORD_RE.search(txt) and mon.TECH_RE.search(txt): reasons.append("fractile+tech")
     if reasons:
         return "accept", reasons
+    # Common-name founders (Pete Hughes, Chris Smith) never auto-accept: in a
+    # tech context the judge decides; otherwise fall through to the reject below.
+    if mon.FOUNDERS_WEAK_RE.search(txt) and mon.TECH_RE.search(txt):
+        return "maybe", []
     # Apify search may return fuzzy matches. Require the exact company token
     # unless a high-signal founder/domain match was already accepted above.
     if not mon.ETCHED_WORD_RE.search(txt):
