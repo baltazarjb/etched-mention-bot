@@ -1,0 +1,49 @@
+name: ArfurGrok post feed
+
+on:
+  schedule:
+    - cron: "5,20,35,50 * * * *"   # offset from the competitor monitors so the runs don't collide
+  workflow_dispatch:
+    inputs:
+      extra:
+        description: "Extra flags: --dry (print what would post, send nothing, save no state)"
+        default: ""
+
+concurrency:
+  group: arfurgrok-feed
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  feed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run ArfurGrok feed
+        env:
+          TWAPI_KEY: ${{ secrets.TWAPI_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_MAIN_CHANNEL: C0C1QG37ZDZ
+        run: python arfurgrok/monitor.py ${{ inputs.extra }}
+
+      - name: Commit updated state
+        if: always()
+        run: |
+          git config user.name "mention-bot"
+          git config user.email "mention-bot@users.noreply.github.com"
+          git add arfurgrok/state.json
+          git diff --staged --quiet && { echo "no state change"; exit 0; }
+          git commit -m "arfurgrok state: $(date -u +%FT%TZ)"
+          for i in 1 2 3 4 5; do
+            if git push; then exit 0; fi
+            git pull --rebase --autostash -X theirs origin main || git rebase --abort
+            sleep 3
+          done
+          exit 1
