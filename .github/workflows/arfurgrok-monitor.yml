@@ -1,8 +1,13 @@
 name: ArfurGrok post feed
 
 on:
+  # New posts arrive by webhook: twitterapi.io filter rule -> arfurgrok/relay worker -> this event.
+  repository_dispatch:
+    types: [arfurgrok-ping]
+  # Backstop for a missed push only. GitHub drops most high-frequency scheduled runs anyway
+  # (the old 15-minute cron fired ~6 times a day), so a tighter cron buys nothing.
   schedule:
-    - cron: "5,20,35,50 * * * *"   # offset from the competitor monitors so the runs don't collide
+    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       extra:
@@ -31,7 +36,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_MAIN_CHANNEL: C0C1QG37ZDZ
-        run: python arfurgrok/monitor.py ${{ inputs.extra }}
+          PUSHED_IDS: ${{ github.event.client_payload.ids }}
+        run: python arfurgrok/monitor.py ${{ github.event_name == 'repository_dispatch' && '--search-only' || '' }} ${{ inputs.extra }}
 
       - name: Commit updated state
         if: always()
