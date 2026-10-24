@@ -56,4 +56,36 @@ assert not m.wanted(rt) and m.wanted(orig)
 m.INCLUDE_RETWEETS = True
 
 json.dumps(bl)   # must be serialisable for chat.postMessage
+
+# run wiring: which endpoints a run calls, with the network and Slack faked out
+import os, sys, time
+def at(epoch): return time.strftime("%a %b %d %H:%M:%S +0000 %Y", time.gmtime(epoch))
+now = int(time.time())
+calls, sent = [], []
+def fake_get(url, headers, retries=4):
+    calls.append(url.split("?")[0].rsplit("/", 1)[-1])
+    if "/twitter/tweets" in url:   # a pushed post from before the window, not yet in search
+        return {"tweets": [post("pushed", id="500", createdAt=at(now - 7200))]}
+    if "last_tweets" in url:       # one new post, then 19 old ones: page 2 must not be fetched
+        return {"tweets": [post("new", id="400", createdAt=at(now - 60))]
+                          + [post("old", id=str(i), createdAt=at(now - 86400)) for i in range(19)],
+                "has_next_page": True, "next_cursor": "c"}
+    return {"tweets": []}
+m._get_json = fake_get
+m.send_main = lambda fb, bl: sent.append(fb)
+m.save_state = lambda s: None
+m.load_state = lambda: {"seen_ids": [], "last_run_epoch": now - 600}
+m.TWAPI_KEY, m.SLACK_BOT_TOKEN, m.SLACK_MAIN_CHANNEL = "k", "x", "c"
+
+sys.argv = ["monitor.py"]; m.main()
+assert calls == ["last_tweets", "advanced_search"], calls
+assert len(sent) == 1 and "/status/400" in sent[0], sent
+
+calls.clear(); sent.clear()
+os.environ["PUSHED_IDS"] = "500,not-an-id"
+sys.argv = ["monitor.py", "--search-only"]; m.main()
+assert calls == ["tweets", "advanced_search"], calls
+assert len(sent) == 1 and "/status/500" in sent[0], "pushed post must post even if older than the window"
+del os.environ["PUSHED_IDS"]
+
 print("ArfurGrok profile checks passed")

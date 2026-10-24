@@ -15,10 +15,17 @@ tiered classifier and no Claude judge. What it does share with them:
     English, so this is a no-op in practice)
 
 Sources (deduped by tweet id):
+  /twitter/tweets?tweet_ids=…   the posts a webhook push reported (PUSHED_IDS env), fetched
+        by id so a search-index lag can't drop them
   /twitter/user/last_tweets?userId=…&includeReplies=true   the account timeline —
-        originals, replies, quotes and native retweets, newest first
+        originals, replies, quotes and native retweets, newest first. Bills ~20 posts per
+        call even when none are new, so webhook-triggered runs skip it (--search-only)
   /twitter/tweet/advanced_search  from:ArfurGrok since_time:…  second sweep, so a
         timeline hiccup can't drop a post; also fills in the since_time window
+
+How runs start: a twitterapi.io filter rule (from:ArfurGrok) pushes new posts to the
+Cloudflare Worker in relay/, which fires a repository_dispatch; the workflow then runs
+this with --search-only and PUSHED_IDS. The cron is only a backstop for missed pushes.
 
 Every post is labelled by kind so the channel reads naturally:
   original       -> "X Post by @ArfurGrok"
@@ -33,6 +40,7 @@ Optional env:
   ANTHROPIC_API_KEY    enables translation of non-English posts (same model as the judges)
 
 Run `python3 monitor.py --dry` to print what WOULD be posted without sending or saving.
+`--search-only` skips the timeline call (what webhook-triggered runs use).
 """
 import datetime
 import json
@@ -58,6 +66,7 @@ ACCOUNT_ID     = "2053001548335124480"
 
 TIMELINE_BASE = "https://api.twitterapi.io/twitter/user/last_tweets"
 SEARCH_BASE   = "https://api.twitterapi.io/twitter/tweet/advanced_search"
+TWEETS_BASE   = "https://api.twitterapi.io/twitter/tweets"
 TRANSLATE_MODEL = "claude-haiku-4-5-20251001"
 STATE_FILE  = os.path.join(os.path.dirname(__file__), "state.json")
 
@@ -127,9 +136,11 @@ def timeline(since_epoch, max_pages=TIMELINE_MAX_PAGES):
         if not tweets: break
         out.extend(tweets)
         pages += 1
-        # timelines can pin an old post to the top, so judge the page by its newest post
-        newest = max((created_epoch(t) for t in tweets), default=0)
-        if newest and newest < since_epoch: break
+        # once a page reaches back past since_epoch the next page is all old posts (and is
+        # billed in full). A pinned old post also stops it at page 1, which is fine: 20 posts
+        # is days of this account, and the search sweep covers anything longer.
+        dated = [e for e in (created_epoch(t) for t in tweets) if e]
+        if dated and min(dated) < since_epoch: break
         if not d.get("has_next_page"): break
         cursor = d.get("next_cursor") or ""
         if not cursor: break
@@ -149,6 +160,14 @@ def search(since_epoch, max_pages=SEARCH_MAX_PAGES):
         cursor = d.get("next_cursor") or ""
         if not cursor: break
     return out
+
+def by_ids(ids):
+    """The posts a webhook push reported. Fetched by id, not by window, so they post
+    even if search hasn't indexed them yet or they predate since_epoch."""
+    ids = [i for i in ids if i.isdigit()][:50]
+    if not ids: return []
+    qs = urllib.parse.urlencode({"tweet_ids": ",".join(ids)})
+    return _tweets_of(_get_json(f"{TWEETS_BASE}?{qs}", {"X-API-Key": TWAPI_KEY}))
 
 def author_of(sub):
     if isinstance(sub, dict):
@@ -351,6 +370,8 @@ def main():
         print("FATAL: set TWAPI_KEY and either SLACK_WEBHOOK_URL or SLACK_BOT_TOKEN + SLACK_MAIN_CHANNEL",
               file=sys.stderr); sys.exit(1)
     dry = "--dry" in sys.argv
+    search_only = "--search-only" in sys.argv
+    pushed = [i.strip() for i in os.environ.get("PUSHED_IDS", "").split(",") if i.strip().isdigit()]
 
     state = load_state()
     seen = set(state.get("seen_ids", []))
@@ -359,9 +380,13 @@ def main():
     since = state.get("last_run_epoch", 0) or (now - FIRST_RUN_LOOKBACK_HOURS * 3600)
     since = max(0, since - OVERLAP_SECONDS)
 
-    # 1) gather from both sources, dedup by id, keep only this account's new posts
+    # 1) gather from every source, dedup by id, keep only this account's new posts
+    sources = []
+    if pushed: sources.append(("pushed", lambda _since: by_ids(pushed)))
+    if not search_only: sources.append(("timeline", timeline))
+    sources.append(("search", search))
     fetched, errors = {}, 0
-    for name, fn in (("timeline", timeline), ("search", search)):
+    for name, fn in sources:
         try:
             got = fn(since)
             n_new = 0
@@ -369,14 +394,15 @@ def main():
                 tid = str(t.get("id") or "")
                 if not tid or tid in seen or tid in fetched: continue
                 if not is_own(t): continue
-                if created_epoch(t) and created_epoch(t) < since: continue   # old post on a timeline page
+                if name != "pushed" and created_epoch(t) and created_epoch(t) < since:
+                    continue   # old post on a timeline page
                 fetched[tid] = t; n_new += 1
             print(f"[{name}] {len(got)} fetched, {n_new} new", flush=True)
         except Exception as e:
             errors += 1
             print(f"[{name} error] {e}", flush=True)
-    if errors == 2:
-        print("FATAL: both sources failed; leaving state untouched so the next run retries", file=sys.stderr)
+    if errors == len(sources):
+        print("FATAL: every source failed; leaving state untouched so the next run retries", file=sys.stderr)
         sys.exit(1)
 
     to_post = [t for t in fetched.values() if wanted(t)]

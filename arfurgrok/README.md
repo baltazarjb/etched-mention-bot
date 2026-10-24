@@ -1,8 +1,31 @@
 # @ArfurGrok post feed
 
 Posts every new X post from [@ArfurGrok](https://x.com/ArfurGrok) ("anon simultaneously at every
-tech company") to `#twitter-arfurgrok`. Runs every 15 minutes on GitHub Actions
-(`.github/workflows/arfurgrok-monitor.yml`), same as the mention monitors.
+tech company") to `#hiring-lab-departures`. Runs on GitHub Actions
+(`.github/workflows/arfurgrok-monitor.yml`), started by a webhook within a few minutes of a post.
+
+## How a run starts
+
+```
+twitterapi.io filter rule "from:ArfurGrok" (checks every 300 s)
+  -> POST https://arfurgrok-relay.<account>.workers.dev/<PING_SECRET>   (relay/worker.js)
+  -> GitHub repository_dispatch "arfurgrok-ping" with the post ids
+  -> workflow runs monitor.py --search-only with PUSHED_IDS
+```
+
+- The rule lives at twitterapi.io/tweet-filter-rules; the webhook URL is the account-wide
+  setting on that page. Each check bills the 15-credit minimum even when nothing matches
+  (300 s = 288 checks/day ≈ 4.3k credits/day ≈ $1.30/month). Change the interval there.
+- twitterapi.io gives the webhook 1 second and never retries, so the worker answers at once.
+- The cron (every 2 hours) is only a backstop for a missed push. Don't tighten it: GitHub
+  dropped ~94% of the old 15-minute schedule (it fired about 6 times a day), and each
+  scheduled run calls the timeline, which bills ~20 posts (300 credits) every time.
+- Webhook runs skip the timeline and fetch the pushed ids directly plus a search sweep
+  (~30 credits a run).
+
+Relay setup (Cloudflare dashboard → Workers): paste `relay/worker.js`, set the variable
+`PING_SECRET` to a random string and the secret `GH_TOKEN` to a fine-grained GitHub token
+limited to this repo with **Contents: read and write** (that is what `repository_dispatch` needs).
 
 ## What it posts
 
@@ -31,7 +54,7 @@ Two twitterapi.io sources, deduplicated by tweet id and against `state.json`:
 - `/twitter/tweet/advanced_search` with `from:ArfurGrok since_time:<last run>` — a second sweep
   so one flaky endpoint can't drop a post.
 
-If both sources fail the run exits non-zero without touching state, so the next run retries the
+If every source fails the run exits non-zero without touching state, so the next run retries the
 same window. The first run looks back 24 hours; later runs fetch only what is new (plus a
 3-minute overlap).
 
